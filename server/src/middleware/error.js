@@ -1,4 +1,5 @@
 import { config } from '../config/index.js';
+import { HttpError } from '../utils/HttpError.js';
 
 export function notFound(req, res) {
   res.status(404).json({ error: { message: `Route not found: ${req.method} ${req.originalUrl}` } });
@@ -24,9 +25,15 @@ export function errorHandler(err, _req, res, next) {
   }
 
   if (status >= 500) {
-    console.error(err);
-    // Don't leak internals in production.
-    if (config.isProd) message = 'Internal server error';
+    // Our own HttpErrors carry deliberate, user-safe messages (e.g. 503 "AI
+    // service is busy") → always show them. Anything else is an unexpected
+    // crash → log the details, but never leak internals in production.
+    if (err instanceof HttpError) {
+      console.error(`[${status}] ${message}`);
+    } else {
+      console.error(err);
+      if (config.isProd) message = 'Internal server error';
+    }
   }
 
   res.status(status).json({
