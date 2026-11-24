@@ -65,9 +65,10 @@ class StreamError extends Error {
  * TypeError (network) or AbortError (the caller aborted = "Stop").
  *
  * @param {{ message: string, conversationId?: string, signal?: AbortSignal,
- *           onMeta?: Function, onDelta?: Function, onDone?: Function }} opts
+ *           onMeta?: Function, onDelta?: Function, onDone?: Function,
+ *           onStopped?: Function }} opts
  */
-export async function streamChat({ message, conversationId, signal, onMeta, onDelta, onDone }) {
+export async function streamChat({ message, conversationId, signal, onMeta, onDelta, onDone, onStopped }) {
   const res = await fetch(`${BASE_URL}/chat/send/stream`, {
     method: 'POST',
     credentials: 'include', // send the httpOnly auth cookie
@@ -113,6 +114,9 @@ export async function streamChat({ message, conversationId, signal, onMeta, onDe
       else if (event === 'done') {
         finished = true
         onDone?.(payload)
+      } else if (event === 'stopped') {
+        finished = true // stopped before any text; nothing was saved
+        onStopped?.()
       } else if (event === 'error') throw new StreamError(payload.message, 502)
     }
   }
@@ -123,6 +127,9 @@ export async function streamChat({ message, conversationId, signal, onMeta, onDe
 // Messages are sent with streamChat(); the non-streaming POST /chat/send
 // endpoint remains on the API for other clients.
 export const chatApi = {
+  // Ask the server to stop a running stream; it then saves exactly the text
+  // it has sent and finishes the stream with a `done` event.
+  stopStream: (streamId) => api.post(`/chat/stop/${streamId}`),
   history: () => api.get('/chat/history').then((r) => r.data.conversations),
   conversation: (id) => api.get(`/chat/history/${id}`).then((r) => r.data),
   remove: (id) => api.delete(`/chat/history/${id}`),

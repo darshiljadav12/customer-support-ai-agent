@@ -1,6 +1,17 @@
 // Centralised, validated configuration. NODE_ENV switches dev/prod behaviour.
 import { z } from 'zod';
 
+// Load server/.env when present (local development). Variables that are
+// already set — by Render, Docker Compose or the shell — always win.
+try {
+  process.loadEnvFile();
+} catch (err) {
+  if (err.code !== 'ENOENT') throw err; // no .env file is fine (production)
+}
+
+// The only AI provider this app supports.
+const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1';
+
 const schema = z.object({
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
   PORT: z.coerce.number().int().positive().default(5000),
@@ -35,7 +46,6 @@ const schema = z.object({
   OPENROUTER_MODELS: z
     .string()
     .default('google/gemma-4-31b-it:free,nvidia/nemotron-3.5-lightning:free,inclusionai/ling-3.2-flash:free'),
-  OPENROUTER_BASE_URL: z.url().default('https://openrouter.ai/api/v1'),
   AI_MAX_TOKENS: z.coerce.number().int().positive().default(1024),
   AI_TIMEOUT_MS: z.coerce.number().int().positive().default(60_000),
   // How many previous messages of the conversation are sent as context.
@@ -77,7 +87,7 @@ export const config = {
   ai: {
     apiKey: env.OPENROUTER_API_KEY,
     models: env.OPENROUTER_MODELS.split(',').map((m) => m.trim()).filter(Boolean),
-    baseUrl: env.OPENROUTER_BASE_URL,
+    baseUrl: OPENROUTER_BASE_URL,
     maxTokens: env.AI_MAX_TOKENS,
     timeoutMs: env.AI_TIMEOUT_MS,
     historyLimit: env.AI_HISTORY_LIMIT,

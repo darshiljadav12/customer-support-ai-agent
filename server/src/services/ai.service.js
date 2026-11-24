@@ -51,11 +51,21 @@ async function requestCompletion(messages, { stream, signal }) {
   return res;
 }
 
-function mapProviderError(status, message) {
+export function mapProviderError(status, message) {
   console.error('[ai] OpenRouter error', status, message);
   if (status === 401 || status === 403) return new HttpError(503, 'AI service authentication failed. Check the API key.');
   if (status === 402) return new HttpError(503, 'AI service credits exhausted.');
-  if (status === 429) return new HttpError(503, 'The AI service is busy right now. Please try again in a moment.');
+  if (status === 429) {
+    // The account's daily free quota ("free-models-per-day") is not a
+    // momentary hiccup — retrying in a moment won't help, so say so.
+    if (/per[-_ ]?day|daily/i.test(String(message ?? ''))) {
+      return new HttpError(
+        503,
+        "The AI assistant has reached today's free usage limit. Please try again tomorrow (the limit resets at 00:00 UTC).",
+      );
+    }
+    return new HttpError(503, 'The AI service is busy right now. Please try again in a moment.');
+  }
   return new HttpError(502, 'The AI service returned an error. Please try again.');
 }
 

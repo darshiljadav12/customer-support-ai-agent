@@ -37,7 +37,8 @@ export default function ChatPage() {
   const [sendingKey, setSendingKey] = useState(null)
   const [sidebarOpen, setSidebarOpen] = useState(false)
 
-  const abortRef = useRef(null) // AbortController of the in-flight stream ("Stop")
+  // The in-flight stream: { controller, streamId, stopping, typewriter } — used by "Stop".
+  const streamRef = useRef(null)
   const activeKeyRef = useRef(activeKey) // current view, for async callbacks
   const scrollRef = useRef(null)
   const stickToBottomRef = useRef(true) // auto-scroll only if the user hasn't scrolled up
@@ -48,7 +49,7 @@ export default function ChatPage() {
   }, [activeKey])
 
   // Stop any running stream when leaving the page (e.g. logout).
-  useEffect(() => () => abortRef.current?.abort(), [])
+  useEffect(() => () => streamRef.current?.controller.abort(), [])
 
   // Derived view state for the active conversation.
   const isCurrent = thread.key === activeKey
@@ -121,7 +122,6 @@ export default function ChatPage() {
       stickToBottomRef.current = true
 
       const controller = new AbortController()
-      abortRef.current = controller
 
       // Only touch the thread if it's still the one this message was sent from.
       const updateMessages = (fn) => setThread((t) => (t.key === key ? { ...t, messages: fn(t.messages) } : t))
@@ -155,14 +155,18 @@ export default function ChatPage() {
       let conversation = null
       let received = ''
       let doneData = null
+      let stoppedEmpty = false
 
       // Network chunks go into the typewriter, which reveals them smoothly
       // (one state update per animation frame at most).
       const typewriter = createTypewriter((visible) =>
         updateMessages((list) => list.map((m) => (m.id === botTempId ? { ...m, content: visible } : m))),
       )
-      // Stop → immediately show everything received (that's what the server saves).
+      // Connection cut → immediately show everything received.
       controller.signal.addEventListener('abort', () => typewriter.flush(), { once: true })
+
+      const stream = { controller, streamId: null, stopping: false, typewriter }
+      streamRef.current = stream
 
       try {
         await streamChat({
@@ -171,15 +175,25 @@ export default function ChatPage() {
           signal: controller.signal,
           onMeta: (data) => {
             conversation = data.conversation
+            stream.streamId = data.streamId
           },
           onDelta: (delta) => {
             received += delta
             typewriter.push(delta)
+            if (stream.stopping) typewriter.flush() // after Stop: no more animation
           },
           onDone: (data) => {
             doneData = data
           },
+          onStopped: () => {
+            stoppedEmpty = true
+          },
         })
+
+        if (stoppedEmpty) {
+          markFailed('Stopped before the assistant replied.') // server saved nothing
+          return
+        }
 
         // Let the typewriter finish revealing, then swap in the saved messages.
         // `clientKey` keeps the React key stable → no remount / flicker.
@@ -195,8 +209,10 @@ export default function ChatPage() {
         )
       } catch (err) {
         if (err.name === 'AbortError') {
+          // Fallback path: the connection was cut (Stop request failed or timed
+          // out, or the page is closing).
           if (conversation && received.trim()) {
-            // Stopped mid-reply: the server keeps the partial answer (stopped: true).
+            // The server keeps the partial answer (stopped: true).
             settle({ ...conversation, lastMessageAt: new Date().toISOString() }, (list) =>
               list.map((m) => {
                 if (m.id === userTempId) return { ...m, pending: false }
@@ -212,14 +228,32 @@ export default function ChatPage() {
           markFailed(getErrorMessage(err)) // AI/network error: nothing was saved
         }
       } finally {
-        if (abortRef.current === controller) abortRef.current = null
+        if (streamRef.current === stream) streamRef.current = null
         setSendingKey(null)
       }
     },
     [activeId, navigate],
   )
 
-  const stop = useCallback(() => abortRef.current?.abort(), [])
+  // Stop: ask the server to stop and keep reading — it saves exactly the text
+  // it has sent and confirms with `done`, so screen and database match.
+  // Falls back to cutting the connection if that doesn't work.
+  const stop = useCallback(() => {
+    const stream = streamRef.current
+    if (!stream || stream.stopping) return
+    stream.stopping = true
+    stream.typewriter.flush() // show everything received so far, right away
+
+    if (!stream.streamId) {
+      stream.controller.abort() // stream not started yet → nothing to keep
+      return
+    }
+    chatApi.stopStream(stream.streamId).catch(() => stream.controller.abort())
+    // Safety net: no confirmation from the server → cut the connection.
+    setTimeout(() => {
+      if (streamRef.current === stream) stream.controller.abort()
+    }, 10_000)
+  }, [])
   const retry = useCallback((message) => send(message.content, message.id), [send])
 
   // ---- Sidebar actions -----------------------------------------------------

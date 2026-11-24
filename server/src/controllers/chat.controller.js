@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import mongoose from 'mongoose';
 import { z } from 'zod';
 import { Conversation } from '../models/Conversation.js';
@@ -84,28 +85,51 @@ export async function sendMessage(req, res) {
 /**
  * POST /chat/send/stream  { message, conversationId? }  → Server-Sent Events
  *
- *   event: meta   data: { conversation }                    (once, first)
- *   event: delta  data: { text }                            (many)
- *   event: done   data: { conversation, userMessage, reply } (success)
- *   event: error  data: { message }                         (failure mid-stream)
+ *   event: meta     data: { conversation, streamId }           (once, first)
+ *   event: delta    data: { text }                             (many)
+ *   event: done     data: { conversation, userMessage, reply } (completed, or
+ *                   stopped by the user → reply.stopped = true)
+ *   event: stopped  data: {}                                   (stopped before any text; nothing saved)
+ *   event: error    data: { message }                          (failure mid-stream)
  *
  * Errors before the stream starts (validation, 404, AI busy) are normal JSON
  * responses with a proper status code.
  *
+ * Stopping: the client calls POST /chat/stop/:streamId and keeps reading.
+ * The server aborts the AI request, saves exactly the text it has already
+ * sent, and confirms with `done` — so what the user saw is what gets saved.
+ *
  * Persistence rules:
- *   - completed           → save user message + reply
- *   - client disconnected → save user message + partial reply (stopped: true),
- *                           only if some text was received
- *   - AI error mid-stream → save nothing
+ *   - completed                 → save user message + reply
+ *   - stopped (user or dropped) → save user message + partial reply
+ *                                 (stopped: true), only if some text was sent
+ *   - AI error mid-stream       → save nothing
  */
+
+// Streams in progress on this server instance: streamId → { userId, stop }.
+// In-memory is fine for a single instance (Render free tier); several
+// instances would need a shared store (e.g. Redis) for /chat/stop.
+const activeStreams = new Map();
+
+// POST /chat/stop/:streamId → ask a running stream (of this user) to stop.
+export function stopStream(req, res) {
+  const entry = activeStreams.get(req.params.streamId);
+  // Same 404 for unknown/finished streams and other users' streams.
+  if (!entry || entry.userId !== req.user._id.toString()) throw new HttpError(404, 'Stream not found');
+  entry.stop();
+  res.status(202).json({ stopping: true });
+}
+
 export async function streamMessage(req, res) {
   const { message, conversationId } = req.body;
   const userId = req.user._id;
 
   const { conversation: existing, history } = await loadContext(conversationId, userId);
 
-  // Abort the upstream AI request as soon as the client goes away.
+  // Aborts the upstream AI request: when the client goes away, or when the
+  // user presses Stop (POST /chat/stop/:streamId).
   const clientAbort = new AbortController();
+  let stoppedByUser = false;
   res.on('close', () => {
     if (!res.writableFinished) clientAbort.abort();
   });
@@ -123,17 +147,27 @@ export async function streamMessage(req, res) {
   });
   res.flushHeaders();
 
+  const writable = () => !res.writableEnded && !res.destroyed;
   const send = (event, data) => {
-    if (!res.writableEnded) res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    if (writable()) res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
   };
   // Comment line every 15s keeps proxies / load balancers from closing an idle stream.
-  const heartbeat = setInterval(() => !res.writableEnded && res.write(': ping\n\n'), 15_000);
+  const heartbeat = setInterval(() => writable() && res.write(': ping\n\n'), 15_000);
+
+  const streamId = randomUUID();
+  activeStreams.set(streamId, {
+    userId: userId.toString(),
+    stop: () => {
+      stoppedByUser = true;
+      clientAbort.abort();
+    },
+  });
 
   let createdConversation = null;
   try {
     const conversation =
       existing ?? (createdConversation = await Conversation.create({ user: userId, title: makeTitle(message) }));
-    send('meta', { conversation });
+    send('meta', { conversation, streamId });
 
     let reply = '';
     let model;
@@ -161,7 +195,9 @@ export async function streamMessage(req, res) {
     if (failure || !reply) {
       // Nothing worth keeping → don't leave an empty conversation behind.
       if (createdConversation) await createdConversation.deleteOne();
-      if (!stopped) {
+      if (stoppedByUser) {
+        send('stopped', {}); // user stopped before any text arrived
+      } else if (!stopped) {
         const error = failure instanceof HttpError ? failure : new HttpError(502, 'The AI returned an empty response. Please try again.');
         if (!(failure instanceof HttpError) && failure) console.error('[chat] stream failed', failure);
         send('error', { message: error.message });
@@ -177,6 +213,7 @@ export async function streamMessage(req, res) {
     if (createdConversation) await createdConversation.deleteOne().catch(() => {});
     send('error', { message: 'Something went wrong. Please try again.' });
   } finally {
+    activeStreams.delete(streamId);
     clearInterval(heartbeat);
     if (!res.writableEnded) res.end();
   }

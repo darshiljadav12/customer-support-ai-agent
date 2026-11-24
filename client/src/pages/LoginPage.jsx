@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { Link } from 'react-router'
 import { useAuth } from '../context/AuthContext.jsx'
 import { getErrorMessage, getFieldErrors } from '../lib/api.js'
-import { AuthCard, Field, FormError, SubmitButton } from '../components/AuthCard.jsx'
+import { AuthCard, Field, FormError, PasswordField, SubmitButton } from '../components/AuthCard.jsx'
 
 export default function LoginPage() {
   const { login } = useAuth()
@@ -55,10 +55,9 @@ export default function LoginPage() {
           onChange={onChange}
           error={fieldErrors.email}
         />
-        <Field
+        <PasswordField
           id="password"
           name="password"
-          type="password"
           label="Password"
           autoComplete="current-password"
           required

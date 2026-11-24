@@ -5,6 +5,7 @@ import { chatLimiter } from '../middleware/rateLimit.js';
 import {
   sendMessage,
   streamMessage,
+  stopStream,
   listConversations,
   getConversation,
   deleteConversation,
@@ -18,6 +19,7 @@ router.use(requireAuth);
 
 router.post('/send', chatLimiter, validate(sendSchema), sendMessage); // full JSON reply
 router.post('/send/stream', chatLimiter, validate(sendSchema), streamMessage); // SSE, token by token
+router.post('/stop/:streamId', stopStream); // stop a running stream (keeps what was sent)
 router.get('/history', listConversations);
 router.get('/history/:id', getConversation);
 router.delete('/history/:id', deleteConversation);

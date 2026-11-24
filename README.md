@@ -4,6 +4,9 @@ A full-stack AI customer-support chat app. Users sign up, chat with an AI suppor
 
 **Stack:** React 19 + Vite + Tailwind · Node.js + Express 5 · MongoDB (Mongoose) · JWT + bcrypt · OpenRouter (free LLMs) · Docker Compose
 
+**Live demo:** https://customer-support-ai-agent-khaki.vercel.app &nbsp;·&nbsp; **API:** https://customer-support-ai-agent-bn7y.onrender.com/health
+(Render's free tier sleeps when idle, so the first request can take up to a minute.)
+
 ---
 
 ## Features
@@ -65,7 +68,7 @@ MONGO_URI="mongodb+srv://<user>:<pass>@<cluster>.mongodb.net/support-agent" dock
 
 ## Local development
 
-Requirements: Node.js 20+ and a MongoDB (local install, Docker, or Atlas).
+Requirements: Node.js 22+ and a MongoDB (local install, Docker, or Atlas).
 
 ```bash
 # 1) API (http://localhost:5000, auto-restarts on change)
@@ -121,7 +124,7 @@ client/src
 
 **Data model:** `User` → many `Conversation` (title, lastMessageAt) → many `Message` (role, content, model, stopped). Every message also stores its owner so all queries are scoped to the user. Indexes: `{user, lastMessageAt}` and `{conversation, createdAt}`.
 
-**Persistence rules for a reply:** completed → saved; user pressed Stop after some text → saved with `stopped: true`; AI error → nothing saved (the user can retry, history never contains half-failed exchanges).
+**Persistence rules for a reply:** completed → saved; user pressed Stop after some text → saved with `stopped: true`, containing exactly the text the user saw; AI error → nothing saved (the user can retry, history never contains half-failed exchanges).
 
 ---
 
@@ -138,6 +141,7 @@ Routes marked 🔒 need the auth cookie or `Authorization: Bearer <token>`.
 | GET 🔒 | `/auth/me` | – | `{ user }` |
 | POST 🔒 | `/chat/send` | `{ message, conversationId? }` | `201 { conversation, userMessage, reply }` |
 | POST 🔒 | `/chat/send/stream` | `{ message, conversationId? }` | `text/event-stream` (see below) |
+| POST 🔒 | `/chat/stop/:streamId` | – | `202` — stops a running stream of yours (see below) |
 | GET 🔒 | `/chat/history` | – | `{ conversations: [...] }` newest first |
 | GET 🔒 | `/chat/history/:id` | – | `{ conversation, messages: [...] }` |
 | DELETE 🔒 | `/chat/history/:id` | – | `204` |
@@ -148,11 +152,16 @@ Omit `conversationId` to start a new conversation. Every endpoint is available b
 **Streaming events** (`/chat/send/stream`):
 
 ```
-event: meta   data: {"conversation":{...}}
-event: delta  data: {"text":"Hello"}          (repeated)
-event: done   data: {"conversation":{...},"userMessage":{...},"reply":{...}}
-event: error  data: {"message":"..."}         (instead of done, on failure)
+event: meta     data: {"conversation":{...},"streamId":"..."}
+event: delta    data: {"text":"Hello"}          (repeated)
+event: done     data: {"conversation":{...},"userMessage":{...},"reply":{...}}
+event: stopped  data: {}                        (stopped before any text — nothing saved)
+event: error    data: {"message":"..."}         (instead of done, on failure)
 ```
+
+**Stopping a reply:** call `POST /chat/stop/:streamId` and keep reading the stream. The server stops the AI, saves
+exactly the text it has already sent (`reply.stopped = true`) and ends the stream with `done` — or with `stopped` if
+no text had been sent yet. Closing the connection also stops the reply (fallback).
 
 Errors that happen before streaming starts (validation, 404, AI unavailable) are returned as normal JSON with a proper status code.
 
@@ -210,7 +219,7 @@ and copy the connection string.
 | Setting | Value |
 |---|---|
 | Root directory | `server` |
-| Runtime | Node |
+| Language / Runtime | **Node** (Render may preselect Docker because of the root `Dockerfile` — change it) |
 | Build command | `npm ci` |
 | Start command | `npm start` |
 | Health check path | `/health` |
@@ -218,6 +227,8 @@ and copy the connection string.
 Environment variables: `NODE_ENV=production`, `MONGO_URI`, `JWT_SECRET`, `OPENROUTER_API_KEY`,
 `APP_URL=https://<your-app>.vercel.app`, and `TRUST_PROXY=2` (requests pass through Vercel *and* Render's proxy;
 the API needs the real client IP for rate limiting).
+
+The Node version comes from `engines` in `server/package.json` (22+); set `NODE_VERSION=22` to pin it.
 
 Note: Render's free instances sleep after ~15 minutes without traffic; the first request afterwards takes a while.
 
@@ -250,7 +261,8 @@ that allow third-party cookies (not Safari by default).
 
 ## Troubleshooting
 
-- **"The AI service is busy right now"** — the free model is rate-limited upstream, or your OpenRouter account hit its **daily free-request limit** (check the API logs — `docker compose logs app` locally, the *Logs* tab on Render; the limit resets daily, adding credits raises it). You can also change `OPENROUTER_MODELS` to other free models from [openrouter.ai/models](https://openrouter.ai/models?q=free).
+- **"The AI assistant has reached today's free usage limit"** — your OpenRouter account used its daily free requests (OpenRouter's `free-models-per-day` limit). It resets at 00:00 UTC; adding credits on OpenRouter raises it.
+- **"The AI service is busy right now"** — the free model is rate-limited upstream; try again shortly (check the API logs — `docker compose logs app` locally, the *Logs* tab on Render). You can also change `OPENROUTER_MODELS` to other free models from [openrouter.ai/models](https://openrouter.ai/models?q=free).
 - **API exits with "Invalid environment configuration"** — a required variable is missing or too short; the message lists which.
 - **Port 8080 already in use** — `APP_PORT=3000 docker compose up`.
 - **Logged out immediately in production** — you're serving over plain HTTP with `NODE_ENV=production`; use HTTPS or set `COOKIE_SECURE=false` for local testing only.
